@@ -73,7 +73,7 @@ class MyPlaceIQClimate(CoordinatorEntity, ClimateEntity):
     _attr_temperature_unit = UnitOfTemperature.CELSIUS
     _attr_min_temp = 16
     _attr_max_temp = 30
-    _attr_target_temperature_step = 1.0
+    _attr_target_temperature_step = 0.5
 
     # pylint: disable=too-many-arguments
     # pylint: disable=too-many-positional-arguments
@@ -156,10 +156,12 @@ class MyPlaceIQClimate(CoordinatorEntity, ClimateEntity):
             mode = aircon.get("mode", "heat")
             target = body.get("zones" if self._is_zone else "aircons", {}).get(self._entity_id, {})
             if mode == "heat":
-                return target.get("targetTemperatureHeat")
-            if mode == "cool":
-                return target.get("targetTemperatureCool")
-            return None
+                val = target.get("targetTemperatureHeat")
+            elif mode == "cool":
+                val = target.get("targetTemperatureCool")
+            else:
+                val = None
+            return float(val) if val is not None else None
         except (json.JSONDecodeError, TypeError) as err:
             logger.error("Failed to parse target temperature: %s", err)
             return None
@@ -227,16 +229,16 @@ class MyPlaceIQClimate(CoordinatorEntity, ClimateEntity):
                     "SetAirconHeatTemperature" if mode == "heat" else "SetAirconCoolTemperature"
                 ),
                 "zoneId" if self._is_zone else "airconId": self._entity_id,
-                "temperature": int(temperature)
+                "temperature": float((round(temperature * 2))/2.0)
             }]
         }
 
         # Optimistic update
         target = body.get("zones" if self._is_zone else "aircons", {}).get(self._entity_id, {})
         if mode == "heat":
-            target["targetTemperatureHeat"] = int(temperature)
+            target["targetTemperatureHeat"] = float((round(temperature * 2))/2.0)
         elif mode == "cool":
-            target["targetTemperatureCool"] = int(temperature)
+            target["targetTemperatureCool"] = float((round(temperature * 2))/2.0)
         if self._is_zone:
             body["zones"][self._entity_id] = target
         else:
