@@ -15,6 +15,8 @@ from .myplaceiq import MyPlaceIQ
 
 logger = logging.getLogger(__name__)
 
+PLATFORMS = ["sensor", "binary_sensor", "button", "climate"]
+
 async def async_setup(hass: HomeAssistant, config: dict) -> bool: # pylint: disable=unused-argument
     """Set up the MyPlaceIQ integration."""
     hass.data.setdefault(DOMAIN, {})
@@ -49,7 +51,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             "myplaceiq": myplaceiq
         }
 
-        await hass.config_entries.async_forward_entry_setups(entry, ["sensor", "button", "climate"])
+        await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
         entry.async_on_unload(entry.add_update_listener(async_reload_entry))
         logger.debug("Added update listener for entry: %s", entry.entry_id)
         return True
@@ -65,8 +67,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             logger.warning("Config entry %s not found in hass.data", entry.entry_id)
             return True
 
-        unload_ok = await hass.config_entries.async_unload_platforms(
-            entry, ["sensor", "button", "climate"])
+        unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
         if unload_ok:
             hass.data[DOMAIN].pop(entry.entry_id, None)
             logger.debug("Successfully unloaded entry: %s", entry.entry_id)
