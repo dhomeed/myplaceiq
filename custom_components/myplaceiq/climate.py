@@ -13,7 +13,7 @@ from .const import DOMAIN
 
 logger = logging.getLogger(__name__)
 
-PRESET_PRIORITY = "priority"
+PRESET_PRIORITY = "Priority"
 PRESET_NORMAL = PRESET_NONE
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_entities):
