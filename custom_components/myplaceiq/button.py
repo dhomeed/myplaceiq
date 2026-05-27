@@ -92,13 +92,15 @@ async def async_setup_entry(hass, config_entry, async_add_entities):
             )
         ])
 
-    # Zone Buttons
+    # Zone Buttons (Toggle and Priority)
     for aircon_id, aircon_data in aircons.items():
         for zone_id in aircon_data.get("zoneOrder", []):
             zone_data = zones.get(zone_id)
-            if (zone_data and
-                zone_data.get("isVisible", False) and
-                zone_data.get("isClickable", False)):
+            if not zone_data or not zone_data.get("isVisible", False):
+                continue
+
+            # Toggle button (only for clickable zones)
+            if zone_data.get("isClickable", False):
                 entities.append(
                     MyPlaceIQButton(
                         coordinator=coordinator,
@@ -108,6 +110,23 @@ async def async_setup_entry(hass, config_entry, async_add_entities):
                         entity_data=zone_data,
                         action="toggle",
                         command_type="SetZoneOpenClose",
+                        command_params=None,
+                        is_zone=True,
+                        aircon_id=aircon_id
+                    )
+                )
+
+            # Priority toggle button (for any zone where priority is allowed)
+            if zone_data.get("isPriorityZoneAllowed", False):
+                entities.append(
+                    MyPlaceIQButton(
+                        coordinator=coordinator,
+                        config_entry=config_entry,
+                        myplaceiq=myplaceiq,
+                        entity_id=zone_id,
+                        entity_data=zone_data,
+                        action="toggle_priority",
+                        command_type="SetPriorityZone",
                         command_params=None,
                         is_zone=True,
                         aircon_id=aircon_id
@@ -139,11 +158,17 @@ class MyPlaceIQButton(ButtonEntity):
         self._name = entity_data.get("name", f"{'Zone' if is_zone else 'Aircon'}")
         self._attr_unique_id = f"{config_entry.entry_id}_{'zone' if is_zone else 'aircon'}_{entity_id}_{action}" # pylint: disable=line-too-long
         self._attr_name = f"{self._name}_{action}".replace(" ", "_").lower()
-        self._attr_icon = (
-            "mdi:toggle-switch" if is_zone or action == "toggle" else
-            "mdi:thermostat"
-        )
+        self._attr_icon = self._resolve_icon(action, is_zone)
         self._attr_entity_category = EntityCategory.CONFIG
+
+    @staticmethod
+    def _resolve_icon(action, is_zone):
+        """Return an appropriate icon for the button action."""
+        if action == "toggle_priority":
+            return "mdi:star-circle"
+        if is_zone or action == "toggle":
+            return "mdi:toggle-switch"
+        return "mdi:thermostat"
 
     def _perform_optimistic_update(self, body, attribute, new_value):
         """Perform an optimistic update to coordinator.data and refresh the appropriate sensor."""
@@ -166,6 +191,20 @@ class MyPlaceIQButton(ButtonEntity):
             logger.warning(
                 "Could not perform optimistic update for %s %s %s: not found in data",
                     entity_type[:-1], self._entity_id, attribute)
+
+    def _perform_priority_optimistic_update(self, body, new_priority_state):
+        """Optimistically toggle isPriorityZone for this zone only."""
+        zones = body.get("zones", {})
+        zone = zones.get(self._entity_id, {})
+        zone["isPriorityZone"] = new_priority_state
+        zone["isPriorityZoneActive"] = new_priority_state
+        zones[self._entity_id] = zone
+        body["zones"] = zones
+        self.coordinator.data = {"body": json.dumps(body)}
+        logger.debug(
+            "Optimistically set isPriorityZone=%s for zone %s on aircon %s",
+            new_priority_state, self._entity_id, self._aircon_id
+        )
 
     async def async_press(self):
         """Handle button press for AC or zone commands."""
@@ -190,10 +229,10 @@ class MyPlaceIQButton(ButtonEntity):
                         }
                     ]
                 }
-                # Perform optimistic update
                 self._perform_optimistic_update(body, "isOn", new_state)
                 logger.debug("Sent toggle command for aircon %s to isOn=%s",
                             self._entity_id, new_state)
+
             elif self._command_type == "SetZoneOpenClose" and self._action == "toggle":
                 # Zone toggle: dynamically determine isOpen
                 zone = body.get("zones", {}).get(self._entity_id, {})
@@ -208,10 +247,28 @@ class MyPlaceIQButton(ButtonEntity):
                         }
                     ]
                 }
-                # Perform optimistic update
                 self._perform_optimistic_update(body, "isOn", new_state)
                 logger.debug("Sent toggle command for zone %s to isOpen=%s",
                             self._entity_id, new_state)
+
+            elif self._command_type == "SetPriorityZone" and self._action == "toggle_priority":
+                # Priority toggle: read current isPriorityZone and flip it
+                zone = body.get("zones", {}).get(self._entity_id, {})
+                current_priority = zone.get("isPriorityZone", False)
+                new_priority = not current_priority
+                command = {
+                    "commands": [
+                        {
+                            "__type": self._command_type,
+                            "zoneId": self._entity_id,
+                            "priorityEnabled": new_priority
+                        }
+                    ]
+                }
+                self._perform_priority_optimistic_update(body, new_priority)
+                logger.debug("Sent SetPriorityZone command for zone %s to priorityEnabled=%s",
+                            self._entity_id, new_priority)
+
             else:
                 # Mode commands: use predefined command_params
                 command = {
@@ -223,7 +280,6 @@ class MyPlaceIQButton(ButtonEntity):
                         }
                     ]
                 }
-                # Optimistic update for mode changes
                 if self._command_type == "SetAirconMode":
                     self._perform_optimistic_update(body, "mode", self._command_params["mode"])
                 logger.debug("Sent %s command for aircon %s: %s",

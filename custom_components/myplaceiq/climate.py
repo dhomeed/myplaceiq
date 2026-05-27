@@ -2,7 +2,9 @@ import json
 import logging
 import time
 import asyncio
-from homeassistant.components.climate import ClimateEntity, ClimateEntityFeature, HVACMode
+from homeassistant.components.climate import (
+    ClimateEntity, ClimateEntityFeature, HVACMode, PRESET_NONE
+)
 from homeassistant.const import UnitOfTemperature
 from homeassistant.core import HomeAssistant
 from homeassistant.config_entries import ConfigEntry
@@ -10,6 +12,9 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from .const import DOMAIN
 
 logger = logging.getLogger(__name__)
+
+PRESET_PRIORITY = "Priority"
+PRESET_NORMAL = PRESET_NONE
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_entities):
     """Set up MyPlaceIQ climate entities from a config entry."""
@@ -69,7 +74,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
 
 class MyPlaceIQClimate(CoordinatorEntity, ClimateEntity):
     # pylint: disable=too-many-instance-attributes
-    _attr_supported_features = ClimateEntityFeature.TARGET_TEMPERATURE
     _attr_temperature_unit = UnitOfTemperature.CELSIUS
     _attr_min_temp = 16
     _attr_max_temp = 30
@@ -102,7 +106,15 @@ class MyPlaceIQClimate(CoordinatorEntity, ClimateEntity):
             [HVACMode.AUTO, HVACMode.OFF] if is_zone else
             [HVACMode.HEAT, HVACMode.COOL, HVACMode.DRY, HVACMode.FAN_ONLY, HVACMode.OFF]
         )
-        self._last_known_is_on = None  # Cache last known isOn state
+        if is_zone and entity_data.get("isPriorityZoneAllowed", False):
+            self._attr_supported_features = (
+                ClimateEntityFeature.TARGET_TEMPERATURE | ClimateEntityFeature.PRESET_MODE
+            )
+            self._attr_preset_modes = [PRESET_PRIORITY, PRESET_NORMAL]
+        else:
+            self._attr_supported_features = ClimateEntityFeature.TARGET_TEMPERATURE
+            self._attr_preset_modes = None
+        self._last_known_is_on = None
 
     def _handle_coordinator_update(self):
         """Handle updated data from the coordinator."""
@@ -207,6 +219,26 @@ class MyPlaceIQClimate(CoordinatorEntity, ClimateEntity):
             logger.error("Failed to parse HVAC mode for %s: %s", self._attr_unique_id, err)
             return HVACMode.OFF
 
+    @property
+    def preset_mode(self):
+        """Return the current preset mode for zone entities."""
+        if not self._is_zone or self._attr_preset_modes is None:
+            return None
+        data = self.coordinator.data
+        if not isinstance(data, dict) or not data or "body" not in data:
+            return PRESET_NORMAL
+        try:
+            body = json.loads(data["body"])
+            zone = body.get("zones", {}).get(self._entity_id, {})
+            is_priority = zone.get("isPriorityZone", False)
+            preset = PRESET_PRIORITY if is_priority else PRESET_NORMAL
+            logger.debug("Zone %s preset_mode: %s (isPriorityZone=%s)",
+                         self._attr_unique_id, preset, is_priority)
+            return preset
+        except (json.JSONDecodeError, TypeError) as err:
+            logger.error("Failed to parse preset mode for %s: %s", self._attr_unique_id, err)
+            return PRESET_NORMAL
+
     async def async_set_temperature(self, **kwargs):
         """Set new target temperature."""
         temperature = kwargs.get("temperature")
@@ -249,7 +281,7 @@ class MyPlaceIQClimate(CoordinatorEntity, ClimateEntity):
         self.async_write_ha_state()
 
         await self._myplaceiq.send_command(command)
-        await asyncio.sleep(2)  # Delay refresh to show optimistic state
+        await asyncio.sleep(2)
         await self.coordinator.async_request_refresh()
 
     async def async_set_hvac_mode(self, hvac_mode):
@@ -324,5 +356,39 @@ class MyPlaceIQClimate(CoordinatorEntity, ClimateEntity):
         self.async_write_ha_state()
 
         await self._myplaceiq.send_command(command)
-        await asyncio.sleep(2)  # Delay refresh to show optimistic state
+        await asyncio.sleep(2)
+        await self.coordinator.async_request_refresh()
+
+    async def async_set_preset_mode(self, preset_mode):
+        """Set priority preset mode for zone entities."""
+        if not self._is_zone or self._attr_preset_modes is None:
+            logger.warning("Preset mode not supported for %s", self._attr_unique_id)
+            return
+
+        data = self.coordinator.data
+        if not isinstance(data, dict) or not data or "body" not in data:
+            return
+        body = json.loads(data["body"])
+
+        new_priority = preset_mode == PRESET_PRIORITY
+        command = {
+            "commands": [{
+                "__type": "SetPriorityZone",
+                "zoneId": self._entity_id,
+                "priorityEnabled": new_priority
+            }]
+        }
+
+        # Optimistic update
+        zone = body.get("zones", {}).get(self._entity_id, {})
+        zone["isPriorityZone"] = new_priority
+        zone["isPriorityZoneActive"] = new_priority
+        body["zones"][self._entity_id] = zone
+        self.coordinator.data["body"] = json.dumps(body)
+        logger.debug("Optimistic update for %s: set preset_mode to %s (isPriorityZone=%s)",
+                     self._attr_name, preset_mode, new_priority)
+        self.async_write_ha_state()
+
+        await self._myplaceiq.send_command(command)
+        await asyncio.sleep(2)
         await self.coordinator.async_request_refresh()
