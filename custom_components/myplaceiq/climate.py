@@ -106,14 +106,24 @@ class MyPlaceIQClimate(CoordinatorEntity, ClimateEntity):
             [HVACMode.AUTO, HVACMode.OFF] if is_zone else
             [HVACMode.HEAT, HVACMode.COOL, HVACMode.DRY, HVACMode.FAN_ONLY, HVACMode.OFF]
         )
-        if is_zone and entity_data.get("isPriorityZoneAllowed", False):
-            self._attr_supported_features = (
-                ClimateEntityFeature.TARGET_TEMPERATURE | ClimateEntityFeature.PRESET_MODE
-            )
-            self._attr_preset_modes = [PRESET_PRIORITY, PRESET_NORMAL]
+        
+        # Cleaned up feature flag logic to separate zones vs main aircon units safely
+        if is_zone:
+            if entity_data.get("isPriorityZoneAllowed", False):
+                self._attr_supported_features = (
+                    ClimateEntityFeature.TARGET_TEMPERATURE | ClimateEntityFeature.PRESET_MODE
+                )
+                self._attr_preset_modes = [PRESET_PRIORITY, PRESET_NORMAL]
+            else:
+                self._attr_supported_features = ClimateEntityFeature.TARGET_TEMPERATURE
+                self._attr_preset_modes = None
         else:
-            self._attr_supported_features = ClimateEntityFeature.TARGET_TEMPERATURE
+            # Main unit gets both target temp sliders and the fan speed selectors
+            self._attr_supported_features = (
+                ClimateEntityFeature.TARGET_TEMPERATURE | ClimateEntityFeature.FAN_MODE
+            )
             self._attr_preset_modes = None
+            
         self._last_known_is_on = None
 
     def _handle_coordinator_update(self):
@@ -178,6 +188,36 @@ class MyPlaceIQClimate(CoordinatorEntity, ClimateEntity):
             logger.error("Failed to parse target temperature: %s", err)
             return None
 
+    @property
+    def fan_modes(self) -> list[str] | None:
+        """Return the list of available fan modes."""
+        if self._is_zone:
+            return None
+        return ["low", "medium", "high"]
+    
+    @property
+    def fan_mode(self) -> str | None:
+        """Return the current fan setting."""
+        if self._is_zone:
+            return None
+        data = self.coordinator.data
+        if not isinstance(data, dict) or not data or "body" not in data:
+            return "low"
+        try:
+            body = json.loads(data["body"])
+            aircon = body.get("aircons", {}).get(self._aircon_id, {})
+            speed = aircon.get("fanSpeedCool", aircon.get("fanSpeedHeat", 1))
+            
+            if speed == 1:
+                return "low"
+            elif speed == 2:
+                return "medium"
+            elif speed == 3:
+                return "high"
+        except (json.JSONDecodeError, TypeError):
+            pass
+        return "low"
+        
     @property
     def hvac_mode(self):
         """Return the current HVAC mode."""
@@ -392,3 +432,45 @@ class MyPlaceIQClimate(CoordinatorEntity, ClimateEntity):
         await self._myplaceiq.send_command(command)
         await asyncio.sleep(2)
         await self.coordinator.async_request_refresh()
+
+    async def async_set_fan_mode(self, fan_mode: str) -> None:
+        """Set new target fan mode."""
+        if self._is_zone:
+            logger.warning("Zones do not support individual global fan speed controls")
+            return
+
+        data = self.coordinator.data
+        if not isinstance(data, dict) or not data or "body" not in data:
+            return
+        body = json.loads(data["body"])
+
+        fan_map = {"low": 1, "medium": 2, "high": 3}
+        if fan_mode not in fan_map:
+            return
+        speed = fan_map[fan_mode]
+
+        # Note: If the backend 'myplaceiq' library rejects the '__type' string name 
+        # because it wasn't pre-defined, you may have to patch its local dictionary map.
+        command = {
+            "commands": [{
+                "__type": "SetAirconFanSpeed",
+                "airconId": self._entity_id,
+                "fanSpeed": speed
+            }]
+        }
+
+        # Optimistic update to ensure UI switches flawlessly without waiting for a poll cycle
+        aircon = body.get("aircons", {}).get(self._entity_id, {})
+        aircon["fanSpeedCool"] = speed
+        aircon["fanSpeedHeat"] = speed
+        body["aircons"][self._entity_id] = aircon
+
+        self.coordinator.data["body"] = json.dumps(body)
+        logger.debug("Optimistic update for %s: set fan_mode to %s", self._attr_name, fan_mode)
+        self.async_write_ha_state()
+
+        # Fire off command over WebSocket and queue a clean refresh
+        await self._myplaceiq.send_command(command)
+        await asyncio.sleep(2)
+        await self.coordinator.async_request_refresh()
+        
