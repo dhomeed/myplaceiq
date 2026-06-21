@@ -396,4 +396,81 @@ class MyPlaceIQClimate(CoordinatorEntity, ClimateEntity):
 
         await self._myplaceiq.send_command(command)
         await asyncio.sleep(2)
-        await self
+        await self.coordinator.async_request_refresh()
+
+    async def async_set_preset_mode(self, preset_mode):
+        """Set priority preset mode for zone entities."""
+        if not self._is_zone or self._attr_preset_modes is None:
+            logger.warning("Preset mode not supported for %s", self._attr_unique_id)
+            return
+
+        data = self.coordinator.data
+        if not isinstance(data, dict) or not data or "body" not in data:
+            return
+        body = json.loads(data["body"])
+
+        new_priority = preset_mode == PRESET_PRIORITY
+        command = {
+            "commands": [{
+                "__type": "SetPriorityZone",
+                "zoneId": self._entity_id,
+                "priorityEnabled": new_priority
+            }]
+        }
+
+        # Optimistic update
+        zone = body.get("zones", {}).get(self._entity_id, {})
+        zone["isPriorityZone"] = new_priority
+        zone["isPriorityZoneActive"] = new_priority
+        body["zones"][self._entity_id] = zone
+        self.coordinator.data["body"] = json.dumps(body)
+        logger.debug("Optimistic update for %s: set preset_mode to %s (isPriorityZone=%s)",
+                     self._attr_name, preset_mode, new_priority)
+        self.async_write_ha_state()
+
+        await self._myplaceiq.send_command(command)
+        await asyncio.sleep(2)
+        await self.coordinator.async_request_refresh()
+
+    async def async_set_fan_mode(self, fan_mode: str) -> None:
+        """Set new target fan mode."""
+        if self._is_zone:
+            logger.warning("Zones do not support individual global fan speed controls")
+            return
+
+        data = self.coordinator.data
+        if not isinstance(data, dict) or not data or "body" not in data:
+            return
+        body = json.loads(data["body"])
+
+        fan_map = {"low": 1, "medium": 2, "high": 3}
+        if fan_mode not in fan_map:
+            return
+        speed = fan_map[fan_mode]
+
+        # Payload formatted perfectly to match your raw packet capture footprints
+        command = {
+            "id": "",
+            "aircons": {
+                self._entity_id: {
+                    "id": self._entity_id,
+                    "fanSpeedCool": speed,
+                    "fanSpeedHeat": speed
+                }
+            }
+        }
+
+        # Optimistic update to ensure UI switches flawlessly without waiting for a poll cycle
+        aircon = body.get("aircons", {}).get(self._entity_id, {})
+        aircon["fanSpeedCool"] = speed
+        aircon["fanSpeedHeat"] = speed
+        body["aircons"][self._entity_id] = aircon
+
+        self.coordinator.data["body"] = json.dumps(body)
+        logger.debug("Optimistic update for %s: set fan_mode to %s", self._attr_name, fan_mode)
+        self.async_write_ha_state()
+
+        # Fire off command over WebSocket and queue a clean refresh
+        await self._myplaceiq.send_command(command)
+        await asyncio.sleep(2)
+        await self.coordinator.async_request_refresh()
